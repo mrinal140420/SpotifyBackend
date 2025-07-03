@@ -1,6 +1,7 @@
 import express from 'express';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import puppeteer from 'puppeteer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -11,16 +12,29 @@ if (!GENIUS_TOKEN) {
   console.warn('⚠️ GENIUS_ACCESS_TOKEN is not set. Check your .env file.');
 }
 
-const scrapeLyricsFromUrl = async (url) => {
+const scrapeLyricsWithCheerio = async (url) => {
   const { data } = await axios.get(url);
   const $ = cheerio.load(data);
   const lyrics = $('div[data-lyrics-container="true"]')
     .map((i, el) => $(el).text().trim())
     .get()
-    .join('\n\n'); // ✅ Cleanly joins all verses
-  return lyrics;
+    .join('\n\n');
+  return lyrics || null;
 };
 
+const scrapeLyricsWithPuppeteer = async (url) => {
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
+  const page = await browser.newPage();
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+  const lyrics = await page.evaluate(() => {
+    const containers = document.querySelectorAll('[data-lyrics-container]');
+    return Array.from(containers).map(c => c.innerText.trim()).join('\n\n');
+  });
+
+  await browser.close();
+  return lyrics || null;
+};
 
 router.get('/', async (req, res) => {
   const { song, artist } = req.query;
@@ -42,7 +56,6 @@ router.get('/', async (req, res) => {
     const hits = searchRes.data.response.hits;
     console.log(`🔎 Genius returned ${hits.length} result(s).`);
 
-    // Flexible match: try exact artist, fallback to title match
     let hit =
       hits.find(h =>
         h.result.primary_artist.name.toLowerCase().includes(artist.toLowerCase())
@@ -58,7 +71,14 @@ router.get('/', async (req, res) => {
     const lyricsUrl = hit.result.url;
     console.log(`🎯 Scraping lyrics from: ${lyricsUrl}`);
 
-    const lyrics = await scrapeLyricsFromUrl(lyricsUrl);
+    // Step 1: Try with Cheerio
+    let lyrics = await scrapeLyricsWithCheerio(lyricsUrl);
+
+    // Step 2: Fallback to Puppeteer if lyrics not found
+    if (!lyrics) {
+      console.warn('⚠️ Cheerio failed. Trying Puppeteer...');
+      lyrics = await scrapeLyricsWithPuppeteer(lyricsUrl);
+    }
 
     if (!lyrics) {
       return res.status(500).json({ error: 'Lyrics found but could not be scraped.' });
